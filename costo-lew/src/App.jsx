@@ -28,11 +28,22 @@ const fmtM    = (n) => { const s=n<0?"−":"+", a=Math.abs(n); return a>=1000?`$
 const fmtPct  = (n) => `${n>=0?"+":""}${n.toFixed(3)}%`;
 const fmtRate = (n) => `${(n*100).toFixed(2)}%`;
 
-// ─── EMBI fetch — 3 endpoints ─────────────────────────────────────────────────
+// ─── EMBI fetch — serverless primero, luego proxy como fallback ───────────────
 async function tryFetchEMBI() {
+  // Intento 1: función serverless propia (sin CORS, sin cache)
+  try {
+    const r = await fetch("/api/embi", { signal: AbortSignal.timeout(6000) });
+    const d = await r.json();
+    if (d?.value && !isNaN(d.value) && d.value > 100) {
+      const src = d.source === "tiempo real"
+        ? "Ambito (tiempo real)"
+        : `Ambito (${d.source}${d.date ? " · " + d.date : ""})`;
+      return { value: d.value, source: src };
+    }
+  } catch(_) {}
+  // Intento 2: allorigins como último recurso
   const proxy = (url) => "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
   const opts  = { signal: AbortSignal.timeout(5000) };
-
   try {
     const r = await fetch(proxy("https://mercados.ambito.com/riesgo-pais/variacion"), opts);
     const j = await r.json();
@@ -40,77 +51,33 @@ async function tryFetchEMBI() {
     const v = parseFloat(String(d.value).replace(",","."));
     if (!isNaN(v) && v > 100 && v < 5000) return { value: v, source: "Ambito Financiero" };
   } catch(_) {}
-
-  try {
-    const r = await fetch(proxy("https://mercados.ambito.com/riesgo-pais/historico-cierre/2026"), opts);
-    const j = await r.json();
-    const arr = JSON.parse(j.contents);
-    if (Array.isArray(arr) && arr.length) {
-      const last = arr[arr.length-1];
-      const v = parseFloat(String(last[1]??last.value??"").replace(",","."));
-      if (!isNaN(v) && v > 100) return { value: v, source: "Ambito (cierre)" };
-    }
-  } catch(_) {}
-
-  try {
-    const r = await fetch(proxy("https://api.dolarito.ar/indices/riesgo-pais"), opts);
-    const j = await r.json();
-    const d = JSON.parse(j.contents);
-    const v = parseFloat(d?.valor ?? d?.value ?? "");
-    if (!isNaN(v) && v > 100) return { value: v, source: "Dolarito.ar" };
-  } catch(_) {}
-
   return null;
 }
-
-// ─── T10y fetch — US Treasury fiscaldata (sin API key) + 2 fallbacks ──────────
+// ─── T10y fetch — serverless primero, luego proxy como fallback ───────────────
 async function tryFetchT10Y() {
-  const proxy = (url) => "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
-  const opts  = { signal: AbortSignal.timeout(6000) };
-
-  // Endpoint 1: US Treasury FiscalData — Daily Par Yield Curve Rates, último registro 10Y
+  // Intento 1: función serverless propia
   try {
-    const url = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/avg_interest_rates" +
-      "?fields=record_date,security_desc,avg_interest_rate_amt" +
-      "&filter=security_desc:eq:Treasury%20Notes&sort=-record_date&page[size]=5";
-    const r = await fetch(proxy(url), opts);
-    const j = await r.json();
-    const d = JSON.parse(j.contents);
-    if (d?.data?.length) {
-      const v = parseFloat(d.data[0].avg_interest_rate_amt);
-      if (!isNaN(v) && v > 0) return { value: v / 100, source: "US Treasury (fiscaldata.gov)" };
+    const r = await fetch("/api/t10y", { signal: AbortSignal.timeout(6000) });
+    const d = await r.json();
+    if (d?.value && !isNaN(d.value) && d.value > 0) {
+      return { value: d.value, source: d.source };
     }
   } catch(_) {}
-
-  // Endpoint 2: Treasury par yield curve rates — daily nominal
+  // Intento 2: Treasury XML directo vía allorigins
+  const proxy = (url) => "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+  const opts  = { signal: AbortSignal.timeout(6000) };
   try {
-    const today = new Date();
-    const y = today.getFullYear();
-    const url = `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=${y}`;
+    const year = new Date().getFullYear();
+    const url = `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=${year}`;
     const r = await fetch(proxy(url), opts);
     const j = await r.json();
     const xml = j.contents;
-    // Parsear el último entry y buscar BC_10YEAR
     const matches = [...xml.matchAll(/<d:BC_10YEAR[^>]*>([\d.]+)<\/d:BC_10YEAR>/g)];
     if (matches.length) {
       const v = parseFloat(matches[matches.length - 1][1]);
       if (!isNaN(v) && v > 0) return { value: v / 100, source: "US Treasury (XML feed)" };
     }
   } catch(_) {}
-
-  // Endpoint 3: stooq.com vía proxy (datos de mercado)
-  try {
-    const url = "https://stooq.com/q/l/?s=10USY.B&f=sd2t2ohlcv&h&e=json";
-    const r = await fetch(proxy(url), opts);
-    const j = await r.json();
-    const d = JSON.parse(j.contents);
-    const close = d?.symbols?.[0]?.close ?? d?.["10USY.B"]?.close;
-    if (close) {
-      const v = parseFloat(close);
-      if (!isNaN(v) && v > 0) return { value: v / 100, source: "Stooq" };
-    }
-  } catch(_) {}
-
   return null;
 }
 
